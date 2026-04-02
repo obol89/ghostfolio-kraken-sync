@@ -1,0 +1,19 @@
+symbol_mapping:
+  # Override automatic symbol resolution when needed.
+  # Keys can be Kraken trading pairs or asset names.
+  #
+  # By default, all crypto symbols resolve to BASEUSD (e.g. BTCUSD,
+  # ETHUSD) which is the format Ghostfolio uses with the Yahoo data
+  # source. The activity's currency field keeps the original Kraken
+  # trade currency (CHF, EUR, etc.) and Ghostfolio handles conversion
+  # automatically.
+  #
+  # You only need entries here when:
+  # - A pair cannot be split automatically (unusual naming)
+  # - The Yahoo Finance symbol differs from the expected BASEUSD format
+  # - You want to point to a different data source or ticker
+  #
+  # Examples:
+  # XXBTZUSD: BTCUSD     # override for old-style prefixed pair
+  # SOL: SOLUSD          # override for staking reward asset
+  # MATIC: MATICUSD      # override for staking reward asset
