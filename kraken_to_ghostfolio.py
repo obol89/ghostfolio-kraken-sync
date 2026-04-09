@@ -218,7 +218,7 @@ def load_mapping(path):
         return {}
     with open(path, "r") as fh:
         data = yaml.safe_load(fh) or {}
-    return data.get("symbol_mapping", {})
+    return data.get("symbol_mapping") or {}
 
 
 def normalize_kraken_asset(asset):
