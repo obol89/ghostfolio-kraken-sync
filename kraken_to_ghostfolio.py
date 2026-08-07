@@ -21,7 +21,21 @@ logging.basicConfig(
 )
 log = logging.getLogger(__name__)
 
+# Failures recorded during a run. A non-empty list makes main() exit non-zero so
+# the scheduler reports the job as failed even when the run completes.
+FAILURES = []
+
+
+def fail(msg, *args):
+    """Log an error and mark the run as failed."""
+    log.error(msg, *args)
+    FAILURES.append(msg % args if args else msg)
+
+
 KRAKEN_API_BASE = "https://api.kraken.com"
+
+# Page size for the paginated Ghostfolio activities endpoint
+GHOST_PAGE_SIZE = 500
 
 # Kraken prefixed asset names to standard names
 # Includes both X-prefixed (XXBT) and unprefixed (XBT) variants that Kraken
@@ -372,43 +386,92 @@ def ghost_find_account_id(config, account_name):
     for acc in accounts:
         if acc.get("name") == account_name:
             return acc["id"]
-    log.error("Ghostfolio account '%s' not found. Available: %s",
-              account_name, [a["name"] for a in accounts])
-    sys.exit(1)
+    raise LookupError(
+        f"Ghostfolio account '{account_name}' not found. "
+        f"Available: {[a['name'] for a in accounts]}"
+    )
+
+
+def ghost_fetch_all_activities(config):
+    """Fetch every activity from Ghostfolio, following skip/take pagination.
+
+    GET /api/v1/activities returns {"activities": [...], "count": N} where count
+    is the total ignoring pagination. The server always appends a unique id
+    tiebreaker to its sort order, so offset paging is stable.
+    """
+    url = f"{config['ghost_host']}/api/v1/activities"
+    headers = ghost_headers(config["ghost_token"])
+    collected = []
+    skip = 0
+
+    while True:
+        resp = requests.get(url, headers=headers,
+                            params={"skip": skip, "take": GHOST_PAGE_SIZE},
+                            timeout=60)
+        resp.raise_for_status()
+        data = resp.json()
+
+        page = data.get("activities") or []
+        count = data.get("count", 0)
+        collected.extend(page)
+
+        # Guard against a non-terminating loop if count is ever inconsistent
+        if not page or len(collected) >= count:
+            break
+        skip += len(page)
+
+    log.info("Fetched %d existing activities from Ghostfolio", len(collected))
+    return collected
+
+
+def warn_if_comments_redacted(activities, matched):
+    """Warn when comments look redacted, which would silently defeat dedup.
+
+    Ghostfolio redacts activities[*].comment under impersonation or restricted
+    view. If that happens every dedup set comes back empty and the next run
+    re-imports the whole history as duplicates.
+    """
+    if activities and not matched and not any(a.get("comment") for a in activities):
+        log.warning(
+            "Ghostfolio returned %d activities but none carry a comment. If this "
+            "instance uses restricted view, comments are redacted and duplicate "
+            "detection will not work - importing may create duplicates.",
+            len(activities),
+        )
 
 
 def ghost_get_existing_comments(config):
-    """Fetch all existing order comments from Ghostfolio for deduplication.
+    """Fetch all existing activity comments from Ghostfolio for deduplication.
 
     Returns a set of comment strings.
     """
-    url = f"{config['ghost_host']}/api/v1/order"
-    resp = requests.get(url, headers=ghost_headers(config["ghost_token"]), timeout=60)
-    resp.raise_for_status()
-    data = resp.json()
-    comments = set()
-    activities = data.get("activities", data) if isinstance(data, dict) else data
-    for order in activities:
-        comment = order.get("comment", "")
-        if comment and comment.startswith("KRAKEN#"):
-            comments.add(comment)
+    activities = ghost_fetch_all_activities(config)
+    comments = {
+        c for c in (a.get("comment") or "" for a in activities)
+        if c.startswith("KRAKEN#")
+    }
+    warn_if_comments_redacted(activities, comments)
     return comments
 
 
 def ghost_import_activities(config, activities):
-    """Import activities into Ghostfolio."""
+    """Import activities into Ghostfolio.
+
+    Returns True on success, False if the import was rejected.
+    """
     if not activities:
         log.info("No new activities to import")
-        return
+        return True
     url = f"{config['ghost_host']}/api/v1/import"
     payload = {"activities": activities}
     resp = requests.post(url, headers=ghost_headers(config["ghost_token"]),
                          json=payload, timeout=60)
     if resp.status_code >= 400:
-        log.error("Import failed (%d): %s", resp.status_code, resp.text)
+        fail("Import failed (%d): %s", resp.status_code, resp.text)
         log.error("Check your mapping file - a symbol may not be recognised by Ghostfolio")
-        return
+        return False
     log.info("Successfully imported %d activities", len(activities))
+    return True
 
 
 def ghost_update_cash_balance(config, account_id, balance):
@@ -429,7 +492,7 @@ def ghost_update_cash_balance(config, account_id, balance):
     resp = requests.put(url, headers=ghost_headers(config["ghost_token"]),
                         json=payload, timeout=30)
     if resp.status_code >= 400:
-        log.error("Failed to update cash balance (%d): %s", resp.status_code, resp.text)
+        fail("Failed to update cash balance (%d): %s", resp.status_code, resp.text)
     else:
         log.info("Updated cash balance for account %s to %.2f", account_id, balance)
 
@@ -588,7 +651,11 @@ def main():
     log.info("Loaded %d symbol mappings", len(mapping))
 
     # Find the Ghostfolio account
-    ghost_account_id = ghost_find_account_id(config, config["ghost_account_name"])
+    try:
+        ghost_account_id = ghost_find_account_id(config, config["ghost_account_name"])
+    except LookupError as exc:
+        log.error("%s", exc)
+        sys.exit(1)
     log.info("Found Ghostfolio account '%s' (ID: %s)", config["ghost_account_name"], ghost_account_id)
 
     # Fetch data from Kraken
@@ -607,7 +674,7 @@ def main():
     log.info("Found %d trades, %d staking rewards, %d deposits, %d withdrawals",
              len(trades), len(staking_entries), len(deposit_entries), len(withdrawal_entries))
 
-    # Get existing orders for deduplication
+    # Get existing activities for deduplication
     existing_comments = ghost_get_existing_comments(config)
     log.info("Found %d existing Kraken activities in Ghostfolio", len(existing_comments))
 
@@ -735,7 +802,7 @@ def main():
 
         ghost_update_cash_balance(config, ghost_account_id, cash_balance)
     except Exception as exc:
-        log.error("Failed to update cash balance: %s", exc)
+        fail("Failed to update cash balance: %s", exc)
 
     # Print unmapped symbols summary
     if unmapped:
@@ -750,6 +817,12 @@ def main():
         print("=" * 60 + "\n")
     else:
         log.info("All symbols resolved via mapping or automatic conversion")
+
+    if FAILURES:
+        log.error("Sync finished with %d failure(s):", len(FAILURES))
+        for item in FAILURES:
+            log.error("  - %s", item)
+        sys.exit(1)
 
     log.info("Sync complete")
 
