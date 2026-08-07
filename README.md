@@ -297,8 +297,15 @@ Pairs combine both naming conventions:
 - `XETHZEUR` = ETH/EUR (old style, both prefixed)
 - `DOTEUR` = DOT/EUR (new base, old quote without prefix)
 - `SOLUSD` = SOL/USD (new style, both standard)
+- `XBTUSDC` = BTC/USDC (new base, stablecoin quote)
 
 The tool handles all these patterns automatically.
+
+### Stablecoin quotes
+
+Ghostfolio validates the activity currency against ISO 4217, and `USDC`, `USDT` and friends are not currency codes. Pairs quoted in a stablecoin are therefore reported in the fiat currency it tracks, so `XBTUSDC` is imported as a BTC trade in `USD`. The peg is 1:1, so no conversion is applied to the price.
+
+Pairs quoted in crypto (`ETHXBT`) are not remapped this way - the price really is denominated in BTC, and relabelling it as USD would import a wrong number. Those need a mapping file entry.
 
 ## Troubleshooting
 
@@ -325,6 +332,15 @@ API_CALL_DELAY=2.0
 ### "not valid for the specified data source YAHOO"
 
 An imported symbol is not recognised by Yahoo Finance. Check the unmapped symbols output at the end of the run and add the correct Yahoo Finance symbol to your mapping file.
+
+### "currency must be a valid ISO4217 currency code"
+
+A pair is quoted in something Ghostfolio does not accept as a currency. Known stablecoin quotes (`USDC`, `USDT`, `DAI`, `PYUSD` and similar) are converted to their pegged fiat automatically; anything else is logged as a warning naming the pair. Add a mapping file entry pointing that pair at a symbol quoted in a real currency, for example:
+
+```yaml
+symbol_mapping:
+  XBTUSDC: BTCUSD
+```
 
 ### Import fails but activities were expected
 

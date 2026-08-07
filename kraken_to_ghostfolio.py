@@ -71,6 +71,28 @@ KRAKEN_ASSET_MAP = {
 
 FIAT_CURRENCIES = {"USD", "EUR", "GBP", "CAD", "JPY", "AUD", "CHF"}
 
+# Stablecoin quote assets to the fiat currency they track.
+#
+# Kraken quotes a growing number of pairs in stablecoins (XBTUSDC, ETHUSDT).
+# Those tickers are not ISO 4217 codes, and Ghostfolio rejects the whole import
+# batch with "currency must be a valid ISO4217 currency code" if one reaches the
+# activity's currency field, so they are reported as their pegged fiat instead.
+#
+# TUSD is deliberately absent: it collides with the tail of ordinary pairs such
+# as DOTUSD, which must keep splitting as DOT/USD.
+STABLECOIN_QUOTE_MAP = {
+    "USDC": "USD",
+    "USDT": "USD",
+    "USDG": "USD",
+    "USDQ": "USD",
+    "DAI": "USD",
+    "PYUSD": "USD",
+    "RLUSD": "USD",
+    "EURT": "EUR",
+    "EURQ": "EUR",
+    "EURR": "EUR",
+}
+
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -272,6 +294,10 @@ def split_kraken_pair(pair):
     - XBTCHF (unprefixed XBT + fiat)
     - DOTEUR (normal base, 3-char quote)
     - SOLUSD (normal base, 3-char quote)
+    - XBTUSDC (normal base, stablecoin quote)
+
+    The returned quote is the Kraken asset, not necessarily an ISO 4217 code -
+    normalize_quote_currency turns it into one.
     """
     # Try known prefixed patterns first: X???Z??? (4+4 chars)
     if len(pair) == 8 and pair[:1] == "X" and pair[4:5] == "Z":
@@ -292,6 +318,17 @@ def split_kraken_pair(pair):
                 base_norm = normalize_kraken_asset(potential_base)
                 return base_norm, quote_norm, True
 
+    # Try splitting with known stablecoin suffixes (3-5 chars).  Checked after
+    # fiat so that DOTUSD still splits as DOT/USD rather than DO/TUSD.
+    for quote_len in (5, 4, 3):
+        if len(pair) > quote_len:
+            potential_quote = pair[-quote_len:]
+            potential_base = pair[:-quote_len]
+            quote_norm = normalize_kraken_asset(potential_quote)
+            if quote_norm in STABLECOIN_QUOTE_MAP:
+                base_norm = normalize_kraken_asset(potential_base)
+                return base_norm, quote_norm, True
+
     # Try known crypto quote currencies
     crypto_quotes = ["XBT", "ETH", "XXBT", "XETH"]
     for cq in crypto_quotes:
@@ -306,26 +343,84 @@ def split_kraken_pair(pair):
     return base, quote, False
 
 
+def normalize_quote_currency(quote):
+    """Map a Kraken quote asset to the currency code Ghostfolio should see.
+
+    Ghostfolio validates the activity currency against ISO 4217, so a stablecoin
+    quote is reported as the fiat it tracks (USDC -> USD).  Anything already
+    fiat, or unknown, is returned unchanged.
+    """
+    normalized = normalize_kraken_asset(quote)
+    return STABLECOIN_QUOTE_MAP.get(normalized, normalized)
+
+
+def quote_currency_from_symbol(symbol):
+    """Extract the quote currency from a resolved symbol like BTCUSD or BTC-USD.
+
+    Returns None when the symbol does not end in a known fiat code, so the
+    caller can fall back to the Kraken pair.
+    """
+    if not symbol:
+        return None
+    candidate = symbol.rsplit("-", 1)[-1] if "-" in symbol else symbol[-3:]
+    candidate = candidate.upper()
+    return candidate if candidate in FIAT_CURRENCIES else None
+
+
+def resolve_trade_currency(pair, base, quote, mapped_symbol=None):
+    """Return the currency a trade in `pair` is denominated in.
+
+    The Kraken quote wins whenever it resolves to a real currency, because it is
+    what the trade price is actually expressed in - a CHF pair stays CHF even if
+    it is mapped to a USD-quoted symbol.  Only when the quote is not a currency
+    at all does the mapped symbol decide, so a mapping.yaml entry like
+    XBTUSDC -> BTCUSD yields USD rather than the raw USDC that Ghostfolio
+    rejects.
+
+    mapped_symbol is passed only for pairs the user mapped explicitly.  Pairs
+    quoted in crypto (ETHXBT) deliberately keep their unusable quote and fail
+    the import loudly, rather than being silently relabelled as USD while the
+    unit price is still denominated in BTC.
+    """
+    normalized = normalize_quote_currency(quote)
+    if normalized in FIAT_CURRENCIES:
+        return normalized
+
+    from_mapping = quote_currency_from_symbol(mapped_symbol)
+    if from_mapping:
+        log.debug("Pair %s: quote %s is not a currency, using %s from the mapped symbol %s",
+                  pair, quote, from_mapping, mapped_symbol)
+        return from_mapping
+
+    log.warning(
+        "Pair %s has quote asset %s, which is not an ISO 4217 currency code. "
+        "Ghostfolio will reject this activity - add a mapping.yaml entry for the "
+        "pair pointing at a symbol quoted in a real currency (e.g. %s: %sUSD).",
+        pair, normalized, pair, base,
+    )
+    return normalized
+
+
 def resolve_symbol(pair, mapping, unmapped):
     """Resolve a Kraken trading pair to a Yahoo Finance symbol.
 
     Returns a (yahoo_symbol, trade_currency) tuple.
     - yahoo_symbol: always BASEUSD (e.g. BTCUSD, ETHUSD) because
       Ghostfolio with Yahoo data source uses this format for crypto.
-    - trade_currency: the original quote currency from the Kraken pair
-      (CHF, EUR, USD, etc.) for the activity's currency field.
+    - trade_currency: the quote currency of the Kraken pair (CHF, EUR, USD,
+      etc.) for the activity's currency field, resolved to an ISO 4217 code.
 
     mapping.yaml overrides take priority and are returned as-is.
     Only adds to unmapped if the pair could not be confidently resolved
     (i.e. fell through to the midpoint split fallback).
     """
-    # Check mapping first (keyed by Kraken pair) - returned as-is
+    base, quote, confident = split_kraken_pair(pair)
+
+    # Check mapping first (keyed by Kraken pair) - returned as-is.  The mapped
+    # symbol also settles the currency when the raw quote is not a real one.
     if pair in mapping:
         mapped = mapping[pair]
-        _base, quote, _ = split_kraken_pair(pair)
-        return mapped, quote
-
-    base, quote, confident = split_kraken_pair(pair)
+        return mapped, resolve_trade_currency(pair, base, quote, mapped)
 
     # Ghostfolio + Yahoo uses BASEUSD format (no hyphen) for crypto
     yahoo_symbol = f"{base}USD"
@@ -334,7 +429,7 @@ def resolve_symbol(pair, mapping, unmapped):
     if not confident and pair not in unmapped:
         unmapped[pair] = {"base": base, "quote": quote, "yahoo": yahoo_symbol}
 
-    return yahoo_symbol, quote
+    return yahoo_symbol, resolve_trade_currency(pair, base, quote)
 
 
 def resolve_staking_symbol(asset, mapping, unmapped):
@@ -475,7 +570,20 @@ def ghost_import_activities(config, activities):
 
 
 def ghost_update_cash_balance(config, account_id, balance):
-    """Update the cash balance on a Ghostfolio account."""
+    """Update the cash balance on a Ghostfolio account.
+
+    The GET response carries far more than the update DTO accepts (aggregations,
+    relations, timestamps).  Ghostfolio 3.x validates bodies with
+    forbidNonWhitelisted, so echoing it back is a hard 400.  The payload is
+    therefore built explicitly from the five fields UpdateAccountDto requires:
+    balance, currency, id, name and platformId (nullable).
+
+    comment, tags and isExcluded are optional in the DTO and deliberately left
+    out - Prisma does not touch a column that is absent from the update, so
+    omitting them preserves the stored values.  For isExcluded that also keeps
+    the payload portable: it was a deprecated DTO field up to Ghostfolio 3.38.0
+    and removed in 3.39.0, so sending it fails outright on newer instances.
+    """
     url = f"{config['ghost_host']}/api/v1/account/{account_id}"
     resp = requests.get(url, headers=ghost_headers(config["ghost_token"]), timeout=30)
     resp.raise_for_status()
@@ -485,7 +593,6 @@ def ghost_update_cash_balance(config, account_id, balance):
         "balance": balance,
         "currency": account_data["currency"],
         "id": account_id,
-        "isExcluded": account_data.get("isExcluded", False),
         "name": account_data["name"],
         "platformId": account_data.get("platformId") or config.get("ghost_platform_id") or None,
     }
