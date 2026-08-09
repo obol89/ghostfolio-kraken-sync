@@ -1,0 +1,11 @@
+# Development and test dependencies.
+#
+# These never enter the Docker image - the Dockerfile installs
+# requirements.txt only.  The runtime dependency list is deliberately kept to
+# two packages; the tests add no third-party mocking library and use
+# unittest.mock from the standard library instead.
+
+-r requirements.txt
+
+pytest>=7.0
+pytest-cov>=4.0

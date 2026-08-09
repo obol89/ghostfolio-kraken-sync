@@ -12,15 +12,35 @@ symbol_mapping:
   # quoted in one are reported in the fiat currency they track: XBTUSDC is
   # imported as a BTC trade in USD.
   #
+  # Asset keys drive reward and airdrop resolution as well as trades. A
+  # reward is a single-asset credit with no pair, so it is looked up by its
+  # raw Kraken asset name first (XXBT.F) and then by the normalized one
+  # (BTC). Both forms work as keys here.
+  #
   # You only need entries here when:
   # - A pair cannot be split automatically (unusual naming)
   # - The Yahoo Finance symbol differs from the expected BASEUSD format
   # - You want to point to a different data source or ticker
   # - A pair is quoted in something the tool cannot map to a currency, which
   #   it warns about by name at the end of the run
+  # - Ghostfolio does not recognise the symbol auto-derived for a reward or
+  #   airdrop asset, which the run lists in its own summary block
   #
   # Examples:
-  # XXBTZUSD: BTCUSD     # override for old-style prefixed pair
-  # XBTUSDC: BTCUSD      # stablecoin-quoted pair, imported in USD
-  # SOL: SOLUSD          # override for staking reward asset
-  # MATIC: MATICUSD      # override for staking reward asset
+  XXBTZUSD: BTCUSD     # override for old-style prefixed pair
+  XBTUSDC: BTCUSD      # stablecoin-quoted pair, imported in USD
+  SOL: SOLUSD          # override for a reward asset, by normalized name
+  XXBT.F: BTCUSD       # override for a reward asset, by raw Kraken name
+  BABY: BABYUSD        # override for an airdropped token
+  ATOM: ATOMUSD  # from Kraken asset ATOM
+  BTC: BTCUSD  # from Kraken asset XXBT
+  DOGE: DOGEUSD  # from Kraken asset XXDG
+  ETH: ETHUSD  # from Kraken asset XETH
+  ETHW: ETHWUSD  # from Kraken asset ETHW
+  HBAR: HBARUSD  # from Kraken asset HBAR
+  LPT: LPTUSD  # from Kraken asset LPT
+  LTC: LTCUSD  # from Kraken asset XLTC
+  LUNA: LUNAUSD  # from Kraken asset LUNA
+  LUNA2: LUNA2USD  # from Kraken asset LUNA2
+  USDC: USDCUSD  # from Kraken asset USDC
+  XRP: XRPUSD  # from Kraken asset XXRP

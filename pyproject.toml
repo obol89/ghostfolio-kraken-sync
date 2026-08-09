@@ -1,0 +1,15 @@
+# Pytest configuration only.
+#
+# Deliberately no [project] or [build-system] table: this repository is a
+# single script, not a package.  The Dockerfile copies requirements.txt, the
+# .py file and entrypoint.sh, so this file never reaches the image.
+#
+# pythonpath puts the repository root on sys.path so `import
+# kraken_to_ghostfolio` works from tests/ without renaming the module (the
+# filename is referenced by the Dockerfile, entrypoint.sh and the README).
+# Built into pytest >= 7.0, no plugin required.
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]
+addopts = "-q --strict-markers"
